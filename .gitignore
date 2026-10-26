@@ -1,0 +1,11 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+.pytest_cache/
+frontend/node_modules/
+frontend/dist/
+pj7to5k33yqe1.jpeg
