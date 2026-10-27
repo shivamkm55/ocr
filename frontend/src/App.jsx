@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import VisualContext, { buildAIReadyText, buildExport } from "./VisualContext";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const ACCEPTED_TYPES = ["image/jpeg", "image/png", "image/webp"];
@@ -77,6 +78,11 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [includeContext, setIncludeContext] = useState(true);
+  const [contextMode, setContextMode] = useState("workflow");
+  const [activeTab, setActiveTab] = useState("text");
+  const copyTimerRef = useRef(null);
+  const tabsRef = useRef(null);
 
   useEffect(() => {
     return () => {
@@ -84,19 +90,25 @@ export default function App() {
     };
   }, [preview]);
 
+  useEffect(() => () => window.clearTimeout(copyTimerRef.current), []);
+
   function reset() {
+    if (loading) return;
     setFile(null);
     setPreview("");
     setResult(null);
     setError("");
     setCopied(false);
+    setActiveTab("text");
     if (inputRef.current) inputRef.current.value = "";
   }
 
   function selectFile(selected) {
-    if (!selected) return;
+    if (!selected || loading) return;
     setError("");
     setResult(null);
+    setCopied(false);
+    setActiveTab("text");
     if (!ACCEPTED_TYPES.includes(selected.type)) {
       setError("Please choose a JPG, PNG, or WebP image.");
       return;
@@ -117,6 +129,8 @@ export default function App() {
 
     const body = new FormData();
     body.append("file", file);
+    body.append("include_context", String(includeContext));
+    body.append("context_mode", contextMode);
 
     try {
       const response = await fetch("/ocr", { method: "POST", body });
@@ -124,7 +138,8 @@ export default function App() {
       if (!response.ok) {
         throw new Error(payload.detail || "Text extraction failed. Please try again.");
       }
-      setResult(payload);
+      setResult({ ...payload, text: payload.text || "", original_text: payload.text || "" });
+      setActiveTab(payload.visual_context ? "context" : "text");
     } catch (requestError) {
       setError(
         requestError instanceof TypeError
@@ -136,24 +151,40 @@ export default function App() {
     }
   }
 
-  async function copyText() {
+  async function copyText(value = result.text, kind = "text") {
     try {
-      await navigator.clipboard.writeText(result.text);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1800);
+      await navigator.clipboard.writeText(value);
+      setCopied(kind);
+      window.clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = window.setTimeout(() => setCopied(false), 1800);
     } catch {
       setError("Clipboard access was blocked. Select the text and copy it manually.");
     }
   }
 
-  function downloadText() {
-    const blob = new Blob([result.text], { type: "text/plain;charset=utf-8" });
+  function downloadText(value = result.text, extension = "txt") {
+    const blob = new Blob([value], { type: extension === "json" ? "application/json;charset=utf-8" : "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${file.name.replace(/\.[^.]+$/, "") || "extracted-text"}.txt`;
+    link.download = `${file.name.replace(/\.[^.]+$/, "") || "extracted-text"}.${extension}`;
     link.click();
-    URL.revokeObjectURL(url);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function handleTabKey(event) {
+    const tabs = [...tabsRef.current.querySelectorAll('[role="tab"]')];
+    const index = tabs.indexOf(event.target);
+    let next;
+    if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+    if (event.key === "ArrowLeft") next = (index - 1 + tabs.length) % tabs.length;
+    if (event.key === "Home") next = 0;
+    if (event.key === "End") next = tabs.length - 1;
+    if (next !== undefined) {
+      event.preventDefault();
+      tabs[next].focus();
+      setActiveTab(tabs[next].dataset.tab);
+    }
   }
 
   return (
@@ -171,23 +202,23 @@ export default function App() {
 
       <main>
         <section className="hero">
-          <div className="eyebrow"><span className="eyebrow-line" /> IMAGE TO TEXT, MADE SIMPLE</div>
-          <h1>Your words are<br />already <span>in there.</span></h1>
-          <p className="hero-copy">Pull text from photos, scans, and screenshots in seconds.<br className="desktop-break" /> Just drop an image and let it happen.</p>
+          <div className="eyebrow"><span className="eyebrow-line" /> TEXT, LAYOUT, AND THE CONNECTIONS BETWEEN</div>
+          <h1>Your image has<br /><span>more to say.</span></h1>
+          <p className="hero-copy">Extract the words and the visual context around them.<br className="desktop-break" /> Built for workflows, diagrams, and code screenshots.</p>
         </section>
 
-        <section className="workspace" aria-label="Image text extraction">
+        <section className="workspace" aria-label="Image text and visual context extraction">
           <div className="workspace-heading">
             <div>
               <p className="section-kicker">THE WORKSPACE</p>
-              <h2>Extract your text</h2>
+              <h2>Read your image</h2>
             </div>
             <span className="privacy-note"><span className="privacy-dot" /> Sent to Google Vision for processing</span>
           </div>
 
           <div
             className={`dropzone ${dragging ? "dropzone-active" : ""} ${file ? "dropzone-filled" : ""}`}
-            onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
+            onDragOver={(event) => { event.preventDefault(); if (!loading) setDragging(true); }}
             onDragLeave={() => setDragging(false)}
             onDrop={(event) => {
               event.preventDefault();
@@ -224,20 +255,33 @@ export default function App() {
               className="file-input"
               type="file"
               accept="image/jpeg,image/png,image/webp"
+              disabled={loading}
               onChange={(event) => selectFile(event.target.files[0])}
               aria-label="Choose an image"
             />
+          </div>
+
+          <div className="analysis-options">
+            <label className="context-option">
+              <input type="checkbox" checked={includeContext} onChange={(event) => setIncludeContext(event.target.checked)} disabled={loading} />
+              <span><strong>Include visual context</strong><small>Layout, colours, grouping, and candidate connections</small></span>
+            </label>
+            <fieldset className="analysis-mode" disabled={!includeContext || loading}>
+              <legend>Image type</legend>
+              <label className={contextMode === "workflow" ? "mode-selected" : ""}><input type="radio" name="context-mode" value="workflow" checked={contextMode === "workflow"} onChange={() => setContextMode("workflow")} />Workflow</label>
+              <label className={contextMode === "code" ? "mode-selected" : ""}><input type="radio" name="context-mode" value="code" checked={contextMode === "code"} onChange={() => setContextMode("code")} />Code screenshot</label>
+            </fieldset>
           </div>
 
           {error && <div className="error-message" role="alert">{error}</div>}
 
           <button className="extract-button" onClick={extractText} disabled={!file || loading}>
             {loading ? (
-              <><span className="spinner" /> Reading your image...</>
+              <><span className="spinner" /> {includeContext ? "Reading text and visual context..." : "Reading your image..."}</>
             ) : result ? (
-              <><Icon name="check" size={18} /> Text extracted <span className="button-arrow">✓</span></>
+              <>Read image again <Icon name="arrow" size={17} /></>
             ) : (
-              <>Extract text <Icon name="arrow" size={17} /></>
+              <>{includeContext ? "Extract text + context" : "Extract text"} <Icon name="arrow" size={17} /></>
             )}
           </button>
 
@@ -246,25 +290,30 @@ export default function App() {
               <div className="result-header">
                 <div>
                   <span className="section-kicker">THE RESULT</span>
-                  <h3>Your extracted text</h3>
+                  <h3>{result.visual_context ? "The words. The bigger picture." : "Your extracted text"}</h3>
                 </div>
                 <div className="result-actions">
-                  <button onClick={copyText} className={`secondary-button ${copied ? "button-success" : ""}`}>
-                    <Icon name={copied ? "check" : "copy"} size={15} /> {copied ? "Copied" : "Copy"}
-                  </button>
-                  <button onClick={downloadText} className="secondary-button">
-                    <Icon name="download" size={15} /> Save .txt
+                  <button onClick={() => copyText(buildAIReadyText(result), "bundle")} className={`secondary-button ${copied === "bundle" ? "button-success" : ""}`}>
+                    <Icon name={copied === "bundle" ? "check" : "copy"} size={15} /> {copied === "bundle" ? "Copied" : "Copy for AI"}
                   </button>
                 </div>
               </div>
-              <textarea
-                className="result-text"
-                value={result.text}
-                onChange={(event) => setResult({ ...result, text: event.target.value })}
-                aria-label="Extracted text, editable"
-                placeholder="No text was detected in this image."
-                spellCheck={false}
-              />
+              {result.context_error && <div className="context-warning" role="status"><strong>Your text is ready.</strong> Visual context could not be completed: {result.context_error}</div>}
+              <div className="result-tabs" role="tablist" aria-label="Extraction results" ref={tabsRef} onKeyDown={handleTabKey}>
+                {[{ id: "text", label: "Text" }, { id: "context", label: "Visual context" }, { id: "data", label: "Structured data" }].map((tab) => <button key={tab.id} id={`tab-${tab.id}`} role="tab" data-tab={tab.id} aria-selected={activeTab === tab.id} aria-controls={`panel-${tab.id}`} tabIndex={activeTab === tab.id ? 0 : -1} onClick={() => setActiveTab(tab.id)}>{tab.label}{tab.id === "context" && result.visual_context && <span className="tab-dot" />}</button>)}
+              </div>
+              <div role="tabpanel" id="panel-text" aria-labelledby="tab-text" hidden={activeTab !== "text"} tabIndex="0">
+                <div className="panel-heading"><p>Edit any words before copying.</p><div className="result-actions"><button onClick={() => copyText()} className={`secondary-button ${copied === "text" ? "button-success" : ""}`}><Icon name={copied === "text" ? "check" : "copy"} size={14} />{copied === "text" ? "Copied" : "Copy text"}</button><button onClick={() => downloadText()} className="secondary-button"><Icon name="download" size={14} />Save .txt</button></div></div>
+                <textarea className="result-text" value={result.text} onChange={(event) => setResult({ ...result, text: event.target.value })} aria-label="Extracted text, editable" placeholder="No text was detected in this image." spellCheck={false} />
+                {result.text !== result.original_text && result.visual_context && <p className="context-caption">Your edits are included in copies and downloads. Region labels still reference the original image text.</p>}
+              </div>
+              <div role="tabpanel" id="panel-context" aria-labelledby="tab-context" hidden={activeTab !== "context"} tabIndex="0">
+                {result.visual_context ? <VisualContext context={result.visual_context} preview={preview} filename={result.filename} /> : <div className="context-unavailable"><Icon name="image" size={26} /><h4>{result.context_error ? "Visual context is unavailable" : "Only text was extracted"}</h4><p>{result.context_error ? "Your extracted text is still available in the Text tab. You can retry the image to request visual context again." : "Enable Include visual context above and read the image again to capture its layout, colours, and connections."}</p></div>}
+              </div>
+              <div role="tabpanel" id="panel-data" aria-labelledby="tab-data" hidden={activeTab !== "data"} tabIndex="0">
+                <div className="panel-heading"><p>Text and observations in one portable file.</p><button onClick={() => downloadText(JSON.stringify(buildExport(result), null, 2), "json")} className="secondary-button"><Icon name="download" size={14} />Save .json</button></div>
+                <pre className="structured-data" tabIndex="0" aria-label="Structured extraction data">{JSON.stringify(buildExport(result), null, 2)}</pre>
+              </div>
               <div className="result-footer">
                 <span><Icon name="file" size={14} /> {file.name}</span>
                 <span>{result.text.length.toLocaleString()} characters</span>
@@ -283,19 +332,19 @@ export default function App() {
               <span className="step-number">01</span>
               <div className="step-icon"><Icon name="image" size={20} /></div>
               <h3>Drop it in</h3>
-              <p>Upload a photo, scan, or screenshot. JPG, PNG, and WebP all work.</p>
+              <p>Upload a workflow, diagram, or code screenshot. JPG, PNG, and WebP all work.</p>
             </article>
             <article className="step">
               <span className="step-number">02</span>
               <div className="step-icon step-icon-accent"><Icon name="sparkles" size={20} /></div>
-              <h3>We read it</h3>
-              <p>Google Vision AI finds and recognizes text, even in complex layouts.</p>
+              <h3>Read the full picture</h3>
+              <p>Extract text with Google Vision, then inspect layout, colours, and possible connections.</p>
             </article>
             <article className="step">
               <span className="step-number">03</span>
               <div className="step-icon"><Icon name="copy" size={20} /></div>
               <h3>Make it yours</h3>
-              <p>Edit, copy, or save the extracted text. It's ready when you are.</p>
+              <p>Review the observations, edit the text, and copy both into your next AI conversation.</p>
             </article>
           </div>
         </section>
